@@ -5,6 +5,7 @@ authors = ["Andrew Farkas"]
 edition = "2024"
 
 [dependencies]
+bytemuck = "1.22.0"
 itertools = "0.14.0"
 log = "0.4.27"
 

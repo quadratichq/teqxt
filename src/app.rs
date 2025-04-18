@@ -31,6 +31,7 @@ impl App {
         let texture_id = renderer.write().register_native_texture(
             &gfx.device,
             &gfx.output_texture
+                .lock()
                 .create_view(&wgpu::TextureViewDescriptor::default()),
             wgpu::FilterMode::Nearest,
         );
@@ -45,21 +46,29 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            let rect = ui
+                .available_rect_before_wrap()
+                .round_to_pixels(ui.pixels_per_point());
+
+            // Update output size
+            self.gfx
+                .set_output_size(rect.width() as u32, rect.height() as u32);
+
+            crate::gfx::draw(&self.gfx);
+
             // Update egui texture
             self.renderer.write().update_egui_texture_from_wgpu_texture(
                 &self.gfx.device,
                 &self
                     .gfx
                     .output_texture
+                    .lock()
                     .create_view(&wgpu::TextureViewDescriptor::default()),
                 wgpu::FilterMode::Nearest,
                 self.texture_id,
             );
 
-            ui.image((
-                self.texture_id,
-                ui.available_size().round_to_pixels(ui.pixels_per_point()),
-            ));
+            ui.put(rect, egui::Image::new((self.texture_id, rect.size())));
         });
     }
 }
