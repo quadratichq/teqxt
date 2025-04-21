@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use egui::mutex::Mutex;
 
 pub struct Gfx {
-    pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub target_format: wgpu::TextureFormat,
@@ -12,12 +11,13 @@ pub struct Gfx {
     pub output_texture: Mutex<wgpu::Texture>,
 
     pub vertex_buffer: Mutex<wgpu::Buffer>,
+    pub uniform_buffer: Mutex<wgpu::Buffer>,
 
     pub render_triangle_pipeline: wgpu::RenderPipeline,
 }
 impl Gfx {
     pub fn new(
-        adapter: wgpu::Adapter,
+        _adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
         target_format: wgpu::TextureFormat,
@@ -33,7 +33,21 @@ impl Gfx {
                 layout: Some(
                     &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("render_triangle_pipeline_layout"),
-                        bind_group_layouts: &[],
+                        bind_group_layouts: &[&device.create_bind_group_layout(
+                            &wgpu::BindGroupLayoutDescriptor {
+                                label: Some("render_triangle_pipeline_bind_group_layout"),
+                                entries: &[wgpu::BindGroupLayoutEntry {
+                                    binding: 0,
+                                    visibility: wgpu::ShaderStages::VERTEX,
+                                    ty: wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Uniform,
+                                        has_dynamic_offset: false,
+                                        min_binding_size: None,
+                                    },
+                                    count: None,
+                                }],
+                            },
+                        )],
                         push_constant_ranges: &[],
                     }),
                 ),
@@ -79,8 +93,14 @@ impl Gfx {
             mapped_at_creation: false,
         });
 
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("uniform_buffer"),
+            size: 8,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+
         Self {
-            adapter,
             device,
             queue,
             target_format,
@@ -89,6 +109,7 @@ impl Gfx {
             output_texture: Mutex::new(output_texture),
 
             vertex_buffer: Mutex::new(vertex_buffer),
+            uniform_buffer: Mutex::new(uniform_buffer),
 
             render_triangle_pipeline,
         }
@@ -132,7 +153,12 @@ impl Gfx {
     }
 }
 
-pub fn draw(gfx: &Gfx) {
+pub struct DrawParams {
+    pub scale: [f32; 2],
+    pub points: [[f32; 2]; 3],
+}
+
+pub fn draw(gfx: &Gfx, params: DrawParams) {
     let mut encoder = gfx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -142,7 +168,13 @@ pub fn draw(gfx: &Gfx) {
     gfx.queue.write_buffer(
         &gfx.vertex_buffer.lock(),
         0,
-        bytemuck::bytes_of(&[[-0.5_f32, -0.5], [0.5, -0.5], [0.0, 0.5]]),
+        bytemuck::bytes_of(&params.points),
+    );
+
+    gfx.queue.write_buffer(
+        &gfx.uniform_buffer.lock(),
+        0,
+        bytemuck::bytes_of(&params.scale),
     );
 
     {
@@ -164,10 +196,21 @@ pub fn draw(gfx: &Gfx) {
         render_pass.set_pipeline(&gfx.render_triangle_pipeline);
 
         render_pass.set_vertex_buffer(0, gfx.vertex_buffer.lock().slice(..));
+        render_pass.set_bind_group(
+            0,
+            &gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("uniform_bind_group"),
+                layout: &gfx.render_triangle_pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: gfx.uniform_buffer.lock().as_entire_binding(),
+                }],
+            }),
+            &[],
+        );
 
         render_pass.draw(0..3, 0..1);
     }
 
     gfx.queue.submit([encoder.finish()]);
-    // TODO
 }
