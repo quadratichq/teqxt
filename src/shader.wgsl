@@ -1,29 +1,68 @@
 @group(0) @binding(0) var<uniform> uniform_params: Uniform;
 
+// origin, p0, p2, p1. These are arranged so that taking the first 3 gives the
+// flat triangle, and taking the last 3 gives the bezier curve.
+@group(0) @binding(1) var<storage> curve_data: array<vec2<f32>>;
+// struct BezierCurve {
+//     @location(0) origin: vec2<f32>,
+//     @location(1) p0: vec2<f32>,
+//     @location(2) p2: vec2<f32>,
+//     @location(3) p1: vec2<f32>,
+// }
+
 struct Uniform {
     scale: vec2<f32>,
 }
 
-struct VertexInput {
-    @location(0) pos: vec2<f32>,
+
+fn get_pos(i: u32) -> vec2<f32> {
+    return curve_data[i];
+}
+fn transform_pos(xy: vec2<f32>) -> vec4<f32> {
+    return vec4(xy * uniform_params.scale * vec2(1.0, -1.0), 0.0, 1.0);
 }
 
+
+
 @vertex
-fn vertex(
-    @builtin(vertex_index) index: u32,
-    in: VertexInput,
-) -> VertexOutput {
-    var out: VertexOutput;
-    let out_xy = in.pos * uniform_params.scale * vec2(1.0, -1.0);
-    out.clip_position = vec4(out_xy, 0.0, 1.0);
+fn triangle_vertex(@builtin(vertex_index) index: u32) -> TriangleVertexOutput {
+    var out: TriangleVertexOutput;
+    out.clip_position = transform_pos(get_pos(index + index / 3));
     return out;
 }
 
-struct VertexOutput {
+struct TriangleVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 };
 
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.3, 0.2, 0.1, 1.0);
+fn triangle_fragment(in: TriangleVertexOutput) -> @location(0) vec4<f32> {
+    return vec4(0.0, 0.5, 1.0, 1.0);
+}
+
+
+
+@vertex
+fn bezier_vertex(@builtin(vertex_index) index: u32) -> BezierVertexOutput {
+    var out: BezierVertexOutput;
+    out.clip_position = transform_pos(get_pos(index + index / 3 + 1));
+    let vertex_index = index % 3;
+    out.barycentric_coordinates = vec2<f32>(vec2(vertex_index) == vec2<u32>(0, 2));
+    return out;
+}
+
+struct BezierVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) barycentric_coordinates: vec2<f32>,
+}
+
+@fragment
+fn bezier_fragment(in: BezierVertexOutput) -> @location(0) vec4<f32> {
+    let t = in.barycentric_coordinates[0];
+    let s = in.barycentric_coordinates[1];
+    let tmp = s/2 + t;
+    if tmp * tmp > t {
+        discard;
+    }
+    return vec4(0.5, 0.0, 0.5, 1.0);
 }

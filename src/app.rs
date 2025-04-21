@@ -3,8 +3,9 @@ use std::sync::Arc;
 use egui::emath::GuiRounding;
 use egui::mutex::RwLock;
 use egui::{TextureId, emath};
+use itertools::Itertools;
 
-use crate::gfx::{DrawParams, Gfx};
+use crate::gfx::{DrawParams, Gfx, Glyph};
 
 pub struct App {
     gfx: Arc<Gfx>,
@@ -112,13 +113,20 @@ impl eframe::App for App {
 
             // NDC = normalized device coordinates (-1 to +1 for the whole texture)
             let em_per_ndc = px_rect_size / 2.0 / self.px_per_em;
+            let points = self
+                .points
+                .iter()
+                .map(|&pos| pos + self.translation)
+                .map(|pos| [pos.x, pos.y])
+                .collect_vec();
             crate::gfx::draw(
                 &self.gfx,
                 DrawParams {
                     scale: [1.0 / em_per_ndc.x, 1.0 / em_per_ndc.y],
-                    points: [self.points[0], self.points[1], self.points[2]]
-                        .map(|pos| pos + self.translation)
-                        .map(|pos| [pos.x, pos.y]),
+                    glyphs: vec![Glyph {
+                        offset: [0.0, 0.0],
+                        curves: vec![[points[0], points[1], points[2]]],
+                    }],
                 },
             );
 
@@ -145,13 +153,19 @@ impl eframe::App for App {
                 for (i, em_pos) in self.points.iter_mut().enumerate() {
                     let egui_pos = em_to_egui.transform_pos(*em_pos + self.translation);
                     let radius = 10.0;
+                    let interaction_rect =
+                        egui::Rect::from_center_size(egui_pos, egui::Vec2::splat(radius));
                     let r = ui.interact(
-                        egui::Rect::from_center_size(egui_pos, egui::Vec2::splat(radius)),
+                        interaction_rect,
                         ui.auto_id_with(("control_point", i)),
                         egui::Sense::drag(),
                     );
                     let stroke = ui.style().interact(&r).fg_stroke;
                     ui.painter().circle_stroke(egui_pos, 10.0, stroke);
+                    ui.put(
+                        interaction_rect,
+                        egui::Label::new(i.to_string()).selectable(false),
+                    );
                     let egui_delta = r.drag_delta();
                     let em_delta = egui_delta * egui_to_em.scale();
                     *em_pos += em_delta;

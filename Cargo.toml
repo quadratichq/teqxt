@@ -8,6 +8,7 @@ edition = "2024"
 bytemuck = "1.22.0"
 itertools = "0.14.0"
 log = "0.4.27"
+parking_lot = "0.12.3"
 
 # GUI dependencies (versions must match)
 eframe = { version = "0.31.1", default-features = false, features = [
@@ -28,3 +29,6 @@ env_logger = "0.11"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
 web-sys = "0.3.70"           # to access the DOM (to hide the loading text)
+
+[profile.release]
+opt-level = "s"

@@ -2217,6 +2217,7 @@ dependencies = [
  "env_logger",
  "itertools",
  "log",
+ "parking_lot",
  "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
