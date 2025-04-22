@@ -10,6 +10,8 @@
 //     @location(3) p1: vec2<f32>,
 // }
 
+@group(0) @binding(2) var sample_texture: texture_2d<f32>;
+
 struct Uniform {
     scale: vec2<f32>,
     translation: vec2<f32>,
@@ -38,7 +40,7 @@ struct TriangleVertexOutput {
 
 @fragment
 fn triangle_fragment(in: TriangleVertexOutput) -> @location(0) vec4<f32> {
-    return vec4(0.0, 0.0, 1.0, 0.1);
+    return vec4(1.0/255.0, 0.0, 0.0, 0.1);
 }
 
 
@@ -65,5 +67,31 @@ fn bezier_fragment(in: BezierVertexOutput) -> @location(0) vec4<f32> {
     if tmp * tmp > t {
         discard;
     }
-    return vec4(1.0, 0.0, 0.0, 0.1);
+    return vec4(1.0/255.0, 0.0, 0.0, 0.1);
+}
+
+
+
+@vertex
+fn postprocess_vertex(@builtin(vertex_index) index: u32) -> PostprocessVertexOutput {
+    let uv = vec2(f32(index % 2), f32(index / 2));
+    var out: PostprocessVertexOutput;
+    out.clip_position = vec4(uv * 2.0 - vec2(1.0), 0.0, 1.0);
+    return out;
+}
+
+struct PostprocessVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+}
+
+@fragment
+fn postprocess_fragment(in: PostprocessVertexOutput) -> @location(0) vec4<f32> {
+    // let size = ;
+    // let uv = in.clip_position.xy / vec2<f32>(textureDimensions(sample_texture))
+    let coords = vec2<u32>(in.clip_position.xy);
+    let data = unpack4xU8(pack4x8unorm(textureLoad(sample_texture, coords, 0)));
+    // if data == 0 {
+    //     discard;
+    // }
+    return vec4(1.0, 1.0, 1.0, f32(data.r % 2));
 }

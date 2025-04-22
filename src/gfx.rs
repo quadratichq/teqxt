@@ -3,12 +3,57 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use itertools::Itertools;
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 
+const SAMPLE_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+const UNIFORM_BINDING: u32 = 0;
+const UNIFORM_BINDING_LAYOUT: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
+    binding: UNIFORM_BINDING,
+    visibility: wgpu::ShaderStages::VERTEX,
+    ty: wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    },
+    count: None,
+};
+
+const CURVE_DATA_BINDING: u32 = 1;
+const CURVE_DATA_BINDING_LAYOUT: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
+    binding: CURVE_DATA_BINDING,
+    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+    ty: wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    },
+    count: None,
+};
+
+const SAMPLE_TEXTURE_BINDING: u32 = 2;
+const SAMPLE_TEXTURE_BINDING_LAYOUT: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
+    binding: SAMPLE_TEXTURE_BINDING,
+    visibility: wgpu::ShaderStages::FRAGMENT,
+    ty: wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        view_dimension: wgpu::TextureViewDimension::D2,
+        multisampled: false,
+    },
+    count: None,
+};
+
+const ADDITIVE_BLENDING: wgpu::BlendComponent = wgpu::BlendComponent {
+    src_factor: wgpu::BlendFactor::One,
+    dst_factor: wgpu::BlendFactor::One,
+    operation: wgpu::BlendOperation::Add,
+};
+
 pub struct Gfx {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub target_format: wgpu::TextureFormat,
 
     pub dirty: AtomicBool,
+    pub sample_texture: Mutex<wgpu::Texture>,
     pub output_texture: Mutex<wgpu::Texture>,
 
     pub bezier_vertex_buffer: Mutex<Option<wgpu::Buffer>>,
@@ -16,6 +61,7 @@ pub struct Gfx {
 
     pub render_triangle_pipeline: wgpu::RenderPipeline,
     pub render_bezier_pipeline: wgpu::RenderPipeline,
+    pub render_postprocess_pipeline: wgpu::RenderPipeline,
 }
 impl Gfx {
     pub fn new(
@@ -25,28 +71,75 @@ impl Gfx {
         target_format: wgpu::TextureFormat,
     ) -> Self {
         let size = wgpu::Extent3d::default(); // 1x1
-        let output_texture = Self::create_output_texture(&device, target_format, size);
+        let sample_texture =
+            Self::create_texture(&device, "sample_texture", SAMPLE_TEXTURE_FORMAT, size);
+        let output_texture = Self::create_texture(&device, "output_texture", target_format, size);
 
         let shader_module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
-        let render_triangle_pipeline = Self::create_render_pipeline(
+        let render_triangle_pipeline = Self::create_render_samples_pipeline(
             &device,
-            target_format,
             &shader_module,
             "render_triangle_pipeline",
             "triangle_vertex",
             "triangle_fragment",
             wgpu::FrontFace::Cw,
         );
-        let render_bezier_pipeline = Self::create_render_pipeline(
+        let render_bezier_pipeline = Self::create_render_samples_pipeline(
             &device,
-            target_format,
             &shader_module,
             "render_bezier_pipeline",
             "bezier_vertex",
             "bezier_fragment",
             wgpu::FrontFace::Ccw,
         );
+
+        let label = "render_postprocess_pipeline";
+        let render_postprocess_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some(&format!("{label}_layout")),
+                        bind_group_layouts: &[&device.create_bind_group_layout(
+                            &wgpu::BindGroupLayoutDescriptor {
+                                label: Some(&format!("{label}_bind_group_layout")),
+                                entries: &[SAMPLE_TEXTURE_BINDING_LAYOUT],
+                            },
+                        )],
+                        push_constant_ranges: &[],
+                    }),
+                ),
+                vertex: wgpu::VertexState {
+                    module: &shader_module,
+                    entry_point: Some("postprocess_vertex"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_module,
+                    entry_point: Some("postprocess_fragment"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview: None,
+                cache: None,
+            });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform_buffer"),
@@ -61,6 +154,7 @@ impl Gfx {
             target_format,
 
             dirty: AtomicBool::from(true),
+            sample_texture: Mutex::new(sample_texture),
             output_texture: Mutex::new(output_texture),
 
             bezier_vertex_buffer: Mutex::new(None),
@@ -68,12 +162,12 @@ impl Gfx {
 
             render_triangle_pipeline,
             render_bezier_pipeline,
+            render_postprocess_pipeline,
         }
     }
 
-    fn create_render_pipeline(
+    fn create_render_samples_pipeline(
         device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
         shader_module: &wgpu::ShaderModule,
         label: &str,
         vertex_entry_point: &str,
@@ -88,28 +182,7 @@ impl Gfx {
                     bind_group_layouts: &[&device.create_bind_group_layout(
                         &wgpu::BindGroupLayoutDescriptor {
                             label: Some(&format!("{label}_bind_group_layout")),
-                            entries: &[
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: 0,
-                                    visibility: wgpu::ShaderStages::VERTEX,
-                                    ty: wgpu::BindingType::Buffer {
-                                        ty: wgpu::BufferBindingType::Uniform,
-                                        has_dynamic_offset: false,
-                                        min_binding_size: None,
-                                    },
-                                    count: None,
-                                },
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: 1,
-                                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                                    ty: wgpu::BindingType::Buffer {
-                                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                        has_dynamic_offset: false,
-                                        min_binding_size: None,
-                                    },
-                                    count: None,
-                                },
-                            ],
+                            entries: &[UNIFORM_BINDING_LAYOUT, CURVE_DATA_BINDING_LAYOUT],
                         },
                     )],
                     push_constant_ranges: &[],
@@ -137,8 +210,11 @@ impl Gfx {
                 entry_point: Some(fragment_entry_point),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState {
+                        color: ADDITIVE_BLENDING,
+                        alpha: ADDITIVE_BLENDING,
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -191,24 +267,29 @@ impl Gfx {
         let mut output_texture = self.output_texture.lock();
         if output_texture.size() != new_size {
             self.dirty.store(true, Ordering::Relaxed);
+            *self.sample_texture.lock() = Self::create_texture(
+                &self.device,
+                "sample_texture",
+                SAMPLE_TEXTURE_FORMAT,
+                new_size,
+            );
             *output_texture =
-                Self::create_output_texture(&self.device, self.target_format, new_size);
+                Self::create_texture(&self.device, "output_texture", self.target_format, new_size);
         }
     }
 
     fn output_texture_view(&self) -> wgpu::TextureView {
-        self.output_texture
-            .lock()
-            .create_view(&wgpu::TextureViewDescriptor::default())
+        self.output_texture.lock().create_view(&Default::default())
     }
 
-    fn create_output_texture(
+    fn create_texture(
         device: &wgpu::Device,
+        label: &str,
         format: wgpu::TextureFormat,
         size: wgpu::Extent3d,
     ) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("output_texture"),
+            label: Some(label),
             size,
             mip_level_count: 1,
             sample_count: 1,
@@ -289,6 +370,50 @@ pub fn draw(gfx: &Gfx, params: DrawParams) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("teqxt_main_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &gfx.sample_texture.lock().create_view(&Default::default()),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_bind_group(
+            0,
+            &gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("teqxt_main_render_pass_bind_group"),
+                layout: &gfx.render_triangle_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: UNIFORM_BINDING,
+                        resource: gfx.uniform_buffer.lock().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: CURVE_DATA_BINDING,
+                        resource: vertex_buffer.as_entire_binding(),
+                    },
+                ],
+            }),
+            &[],
+        );
+
+        let vertex_count = curves.len() as u32 * 3;
+
+        render_pass.set_pipeline(&gfx.render_triangle_pipeline);
+        render_pass.draw(0..vertex_count, 0..1);
+
+        render_pass.set_pipeline(&gfx.render_bezier_pipeline);
+        render_pass.draw(0..vertex_count, 0..1);
+    }
+
+    {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("teqxt_postprocess_render_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &gfx.output_texture_view(),
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -304,29 +429,20 @@ pub fn draw(gfx: &Gfx, params: DrawParams) {
         render_pass.set_bind_group(
             0,
             &gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("uniform_bind_group"),
-                layout: &gfx.render_triangle_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: gfx.uniform_buffer.lock().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: vertex_buffer.as_entire_binding(),
-                    },
-                ],
+                label: Some("teqxt_postprocess_render_pass_bind_group"),
+                layout: &gfx.render_postprocess_pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: SAMPLE_TEXTURE_BINDING,
+                    resource: wgpu::BindingResource::TextureView(
+                        &gfx.sample_texture.lock().create_view(&Default::default()),
+                    ),
+                }],
             }),
             &[],
         );
 
-        let vertex_count = curves.len() as u32 * 3;
-
-        render_pass.set_pipeline(&gfx.render_triangle_pipeline);
-        render_pass.draw(0..vertex_count, 0..1);
-
-        render_pass.set_pipeline(&gfx.render_bezier_pipeline);
-        render_pass.draw(0..vertex_count, 0..1);
+        render_pass.set_pipeline(&gfx.render_postprocess_pipeline);
+        render_pass.draw(0..4, 0..1);
     }
 
     gfx.queue.submit([encoder.finish()]);
