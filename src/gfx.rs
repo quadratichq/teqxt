@@ -50,7 +50,7 @@ impl Gfx {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform_buffer"),
-            size: 8,
+            size: std::mem::size_of::<Uniform>() as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -125,7 +125,7 @@ impl Gfx {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face,
-                cull_mode: Some(wgpu::Face::Front),
+                cull_mode: None,
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
@@ -138,7 +138,7 @@ impl Gfx {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -222,6 +222,7 @@ impl Gfx {
 
 pub struct DrawParams {
     pub scale: [f32; 2],
+    pub translation: [f32; 2],
     pub glyphs: Vec<Glyph>,
 }
 
@@ -230,8 +231,10 @@ pub struct DrawParams {
 #[derive(Debug, Default, Copy, Clone, bytemuck::NoUninit, bytemuck::Zeroable)]
 pub struct Uniform {
     pub scale: [f32; 2],
+    pub translation: [f32; 2],
 }
 
+#[derive(Debug, Clone)]
 pub struct Glyph {
     pub offset: [f32; 2],
     pub curves: Vec<[[f32; 2]; 3]>,
@@ -278,6 +281,7 @@ pub fn draw(gfx: &Gfx, params: DrawParams) {
         0,
         bytemuck::bytes_of(&Uniform {
             scale: params.scale,
+            translation: params.translation,
         }),
     );
 

@@ -9,6 +9,8 @@ bytemuck = "1.22.0"
 itertools = "0.14.0"
 log = "0.4.27"
 parking_lot = "0.12.3"
+parley = { version = "0.3.0", default-features = false, features = ["std"] }
+swash = { version = "*", default-features = false, features = ["scale"] }
 
 # GUI dependencies (versions must match)
 eframe = { version = "0.31.1", default-features = false, features = [

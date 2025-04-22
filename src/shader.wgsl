@@ -12,6 +12,7 @@
 
 struct Uniform {
     scale: vec2<f32>,
+    translation: vec2<f32>,
 }
 
 
@@ -19,7 +20,7 @@ fn get_pos(i: u32) -> vec2<f32> {
     return curve_data[i];
 }
 fn transform_pos(xy: vec2<f32>) -> vec4<f32> {
-    return vec4(xy * uniform_params.scale * vec2(1.0, -1.0), 0.0, 1.0);
+    return vec4((xy + uniform_params.translation) * uniform_params.scale, 0.0, 1.0);
 }
 
 
@@ -37,7 +38,7 @@ struct TriangleVertexOutput {
 
 @fragment
 fn triangle_fragment(in: TriangleVertexOutput) -> @location(0) vec4<f32> {
-    return vec4(0.0, 0.5, 1.0, 1.0);
+    return vec4(0.0, 0.0, 1.0, 0.1);
 }
 
 
@@ -64,5 +65,5 @@ fn bezier_fragment(in: BezierVertexOutput) -> @location(0) vec4<f32> {
     if tmp * tmp > t {
         discard;
     }
-    return vec4(0.5, 0.0, 0.5, 1.0);
+    return vec4(1.0, 0.0, 0.0, 0.1);
 }
