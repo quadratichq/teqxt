@@ -5,8 +5,7 @@ use egui::mutex::RwLock;
 use egui::{TextureId, emath};
 use itertools::Itertools;
 use parley::{
-    Alignment, AlignmentOptions, Font, FontContext, FontWeight, FontWidth, InlineBox, Layout,
-    LayoutContext, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, FontWeight, Layout, LayoutContext, StyleProperty,
 };
 use swash::FontRef;
 use swash::zeno::{PathData, Vector};
@@ -45,9 +44,6 @@ pub struct App {
     /// Text to render.
     text: String,
     glyphs: Vec<Glyph>,
-
-    /// Points, stored in em coordinates.
-    points: Vec<egui::Pos2>,
 
     initial: bool,
 }
@@ -101,12 +97,6 @@ impl App {
 
             text: GREETINGS.iter().join("\n"),
             glyphs: vec![],
-
-            points: vec![
-                egui::pos2(0.0, 0.0),
-                egui::pos2(1.0, 6.0),
-                egui::pos2(4.0, 3.0),
-            ],
 
             initial: true,
         }
@@ -188,11 +178,9 @@ impl eframe::App for App {
                                                     ]);
                                                     last_point = vector;
                                                 }
-                                                swash::zeno::Command::CurveTo(
-                                                    vector,
-                                                    vector1,
-                                                    vector2,
-                                                ) => todo!("cubic bezier is not implemented"),
+                                                swash::zeno::Command::CurveTo(..) => {
+                                                    todo!("cubic bezier is not implemented")
+                                                }
                                                 swash::zeno::Command::QuadTo(vector, vector1) => {
                                                     curves.push([last_point, vector, vector1]);
                                                     last_point = vector1;
@@ -218,7 +206,7 @@ impl eframe::App for App {
                                     }
                                 }
                             }
-                            parley::PositionedLayoutItem::InlineBox(positioned_inline_box) => {
+                            parley::PositionedLayoutItem::InlineBox(_positioned_inline_box) => {
                                 todo!("handle inline box")
                             }
                         }
@@ -238,7 +226,6 @@ impl eframe::App for App {
             let em_rect_size = px_rect_size / self.px_per_em;
             let em_rect = egui::Rect::from_center_size(egui::Pos2::ZERO, em_rect_size);
             let egui_to_em = emath::RectTransform::from_to(egui_rect, em_rect);
-            let em_to_egui = egui_to_em.inverse();
 
             // Update output size
             self.gfx
@@ -273,28 +260,6 @@ impl eframe::App for App {
                     egui_rect,
                     egui::Image::new((self.texture_id, egui_rect.size())),
                 );
-
-                // // Draw points and handle drag interaction
-                // for (i, em_pos) in self.points.iter_mut().enumerate() {
-                //     let egui_pos = em_to_egui.transform_pos(*em_pos + self.translation);
-                //     let radius = 10.0;
-                //     let interaction_rect =
-                //         egui::Rect::from_center_size(egui_pos, egui::Vec2::splat(radius));
-                //     let r = ui.interact(
-                //         interaction_rect,
-                //         ui.auto_id_with(("control_point", i)),
-                //         egui::Sense::drag(),
-                //     );
-                //     let stroke = ui.style().interact(&r).fg_stroke;
-                //     ui.painter().circle_stroke(egui_pos, 10.0, stroke);
-                //     ui.put(
-                //         interaction_rect,
-                //         egui::Label::new(i.to_string()).selectable(false),
-                //     );
-                //     let egui_delta = r.drag_delta();
-                //     let em_delta = egui_delta * egui_to_em.scale();
-                //     *em_pos += em_delta;
-                // }
             });
 
             let r = ui.interact(

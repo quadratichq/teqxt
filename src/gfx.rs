@@ -215,7 +215,7 @@ impl Gfx {
                 }),
             ),
             vertex: wgpu::VertexState {
-                module: &shader_module,
+                module: shader_module,
                 entry_point: Some(vertex_entry_point),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[],
@@ -232,7 +232,7 @@ impl Gfx {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &shader_module,
+                module: shader_module,
                 entry_point: Some(fragment_entry_point),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -251,10 +251,7 @@ impl Gfx {
 
     /// Resizes the bezier vertex buffer to the given length and locks its
     /// mutex.
-    pub fn lock_bezier_vertex_buffer<'a>(
-        &'a self,
-        len: usize,
-    ) -> MappedMutexGuard<'a, wgpu::Buffer> {
+    pub fn lock_bezier_vertex_buffer(&self, len: usize) -> MappedMutexGuard<'_, wgpu::Buffer> {
         let desired_size = std::cmp::max(len as u64, 1) * BezierCurve::WGPU_STRIDE;
         self.resize_and_lock_buffer(
             Some("bezier_vertex_buffer"),
@@ -432,7 +429,7 @@ pub fn draw(gfx: &Gfx, params: DrawParams) {
                 wgpu::BindGroupEntry {
                     binding: UNIFORM_BINDING,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &*gfx.uniform_buffer.lock(),
+                        buffer: &gfx.uniform_buffer.lock(),
                         offset: 0,
                         size: Some(NonZeroU64::new(Uniform::WGPU_SIZE).unwrap()),
                     }),
