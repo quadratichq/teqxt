@@ -15,6 +15,7 @@
 struct Uniform {
     scale: vec2<f32>,
     translation: vec2<f32>,
+    components: vec4<f32>,
 }
 
 const SAMPLE_COUNT: f32 = 2.0;
@@ -23,7 +24,7 @@ const SAMPLE_COUNT: f32 = 2.0;
 
 fn get_and_transform_pos(i: u32) -> vec4<f32> {
     let xy: vec2<f32> = curve_data[i];
-    return vec4((xy + uniform_params.translation) * uniform_params.scale, 0.0, 1.0);
+    return vec4(xy * uniform_params.scale + uniform_params.translation, 0.0, 1.0);
 }
 
 fn additive_sample_output_color(front_facing: bool) -> vec4<f32> {
@@ -47,7 +48,7 @@ struct TriangleVertexOutput {
 
 @fragment
 fn triangle_fragment(in: TriangleVertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
-    return additive_sample_output_color(front_facing);
+    return additive_sample_output_color(front_facing) * uniform_params.components;
 }
 
 
@@ -80,8 +81,8 @@ fn bezier_fragment(in: BezierVertexOutput, @builtin(front_facing) front_facing: 
         discard;
     }
 
-    return additive_sample_output_color(front_facing);
-    // return vec4(in.uv, 0.5, select(1.0, 0.2, in.uv.x * in.uv.x < in.uv.y));
+    return additive_sample_output_color(front_facing) * uniform_params.components;
+    // return vec4(in.uv, 0.5, select(1.0, 0.2, in.uv.x * in.uv.x < in.uv.y)) * uniform_params.components;
 }
 
 
@@ -98,9 +99,10 @@ struct PostprocessVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
 }
 
-@fragment
-fn postprocess_fragment(in: PostprocessVertexOutput) -> @location(0) vec4<f32> {
-    let coords = vec2<u32>(in.clip_position.xy);
+fn get_totals(coords: vec2<u32>) -> vec4<f32> {
+    if any(coords > textureDimensions(sample_texture)) {
+        return vec4(0.0);
+    }
     let texture_value = textureLoad(sample_texture, coords, 0);
 
     let data: u32 = pack4x8unorm(texture_value);
@@ -116,5 +118,20 @@ fn postprocess_fragment(in: PostprocessVertexOutput) -> @location(0) vec4<f32> {
     // Get total for each component separately, then convert to float.
     let totals = vec4<f32>(unpack4xU8(packed_totals));
 
-    return vec4(totals.rgb / SAMPLE_COUNT, 1.0);
+    return vec4(totals.rgb, 1.0);
+}
+
+@fragment
+fn postprocess_fragment(in: PostprocessVertexOutput) -> @location(0) vec4<f32> {
+    let coords = vec2<u32>(in.clip_position.xy);
+
+    let left = get_totals(coords - vec2(1, 0));
+    let mid = get_totals(coords);
+    let right = get_totals(coords + vec2(1, 0));
+    return vec4(
+        (left.b + mid.r + mid.g) / (SAMPLE_COUNT * 3),
+        (mid.r + mid.g + mid.b) / (SAMPLE_COUNT * 3),
+        (mid.g + mid.b + right.r) / (SAMPLE_COUNT * 3),
+        mid.a,
+    );
 }

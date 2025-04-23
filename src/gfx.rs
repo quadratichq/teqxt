@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use itertools::Itertools;
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
@@ -8,10 +11,10 @@ const SAMPLE_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Uno
 const UNIFORM_BINDING: u32 = 0;
 const UNIFORM_BINDING_LAYOUT: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
     binding: UNIFORM_BINDING,
-    visibility: wgpu::ShaderStages::VERTEX,
+    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
     ty: wgpu::BindingType::Buffer {
         ty: wgpu::BufferBindingType::Uniform,
-        has_dynamic_offset: false,
+        has_dynamic_offset: true,
         min_binding_size: None,
     },
     count: None,
@@ -45,6 +48,29 @@ const ADDITIVE_BLENDING: wgpu::BlendComponent = wgpu::BlendComponent {
     src_factor: wgpu::BlendFactor::One,
     dst_factor: wgpu::BlendFactor::One,
     operation: wgpu::BlendOperation::Add,
+};
+
+/// Sample locations, based on [a blog post by Evan Wallace][evanwallace].
+///
+/// [evanwallace]:
+///     https://medium.com/@evanwallace/easy-scalable-text-rendering-on-the-gpu-c3f4d782c5ac,
+const SAMPLES: &[([f32; 2], [f32; 4])] = {
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+    const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
+    const GREEN_ALPHA: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+    // Add alpha on one sample for metadata. We choose a sample that is near the
+    // middle of the pixel.
+
+    &[
+        ([0.0 / 6.0, 4.0 / 6.0], BLUE),
+        ([1.0 / 6.0, 1.0 / 6.0], BLUE),
+        ([2.0 / 6.0, 5.0 / 6.0], GREEN),
+        ([3.0 / 6.0, 2.0 / 6.0], GREEN_ALPHA),
+        ([4.0 / 6.0, 3.0 / 6.0], RED),
+        ([5.0 / 6.0, 0.0 / 6.0], RED),
+    ]
 };
 
 pub struct Gfx {
@@ -133,7 +159,7 @@ impl Gfx {
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING), // TODO: maybe not this?
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -143,7 +169,7 @@ impl Gfx {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform_buffer"),
-            size: std::mem::size_of::<Uniform>() as u64,
+            size: Uniform::WGPU_STRIDE as u64 * SAMPLES.len() as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -210,10 +236,10 @@ impl Gfx {
                 entry_point: Some(fragment_entry_point),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: SAMPLE_TEXTURE_FORMAT,
                     blend: Some(wgpu::BlendState {
                         color: ADDITIVE_BLENDING,
-                        alpha: ADDITIVE_BLENDING,
+                        alpha: wgpu::BlendComponent::REPLACE, // use alpha channel for extra info, not samples
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -313,6 +339,11 @@ pub struct DrawParams {
 pub struct Uniform {
     pub scale: [f32; 2],
     pub translation: [f32; 2],
+    pub components: [f32; 4],
+}
+impl Uniform {
+    const WGPU_SIZE: u64 = std::mem::size_of::<Self>() as u64;
+    const WGPU_STRIDE: u32 = wgpu::Limits::downlevel_defaults().min_uniform_buffer_offset_alignment;
 }
 
 #[derive(Debug, Clone)]
@@ -357,14 +388,26 @@ pub fn draw(gfx: &Gfx, params: DrawParams) {
     gfx.queue
         .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&curves));
 
-    gfx.queue.write_buffer(
-        &gfx.uniform_buffer.lock(),
-        0,
-        bytemuck::bytes_of(&Uniform {
-            scale: params.scale,
-            translation: params.translation,
-        }),
-    );
+    let output_size = gfx.output_texture.lock().size();
+    let pixel_width = 2.0 / output_size.width as f32;
+    let pixel_height = 2.0 / output_size.height as f32;
+
+    for (i, &(offset, components)) in SAMPLES.iter().enumerate() {
+        gfx.queue.write_buffer(
+            &gfx.uniform_buffer.lock(),
+            i as u64 * Uniform::WGPU_STRIDE as u64,
+            bytemuck::bytes_of(&Uniform {
+                scale: params.scale,
+                translation: [
+                    (params.translation[0] * params.scale[0] / pixel_width).floor() * pixel_width
+                        + offset[0] * pixel_width,
+                    (params.translation[1] * params.scale[0] / pixel_height).floor() * pixel_height
+                        + offset[1] * pixel_height,
+                ],
+                components,
+            }),
+        );
+    }
 
     {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -382,32 +425,38 @@ pub fn draw(gfx: &Gfx, params: DrawParams) {
             occlusion_query_set: None,
         });
 
-        render_pass.set_bind_group(
-            0,
-            &gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("teqxt_main_render_pass_bind_group"),
-                layout: &gfx.render_triangle_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: UNIFORM_BINDING,
-                        resource: gfx.uniform_buffer.lock().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: CURVE_DATA_BINDING,
-                        resource: vertex_buffer.as_entire_binding(),
-                    },
-                ],
-            }),
-            &[],
-        );
+        let bind_group = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("teqxt_main_render_pass_bind_group"),
+            layout: &gfx.render_triangle_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: UNIFORM_BINDING,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &*gfx.uniform_buffer.lock(),
+                        offset: 0,
+                        size: Some(NonZeroU64::new(Uniform::WGPU_SIZE).unwrap()),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: CURVE_DATA_BINDING,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
         let vertex_count = curves.len() as u32 * 3;
 
         render_pass.set_pipeline(&gfx.render_triangle_pipeline);
-        render_pass.draw(0..vertex_count, 0..1);
+        for i in 0..SAMPLES.len() as u32 {
+            render_pass.set_bind_group(0, &bind_group, &[i * Uniform::WGPU_STRIDE]);
+            render_pass.draw(0..vertex_count, 0..1);
+        }
 
         render_pass.set_pipeline(&gfx.render_bezier_pipeline);
-        render_pass.draw(0..vertex_count, 0..1);
+        for i in 0..SAMPLES.len() as u32 {
+            render_pass.set_bind_group(0, &bind_group, &[i * Uniform::WGPU_STRIDE]);
+            render_pass.draw(0..vertex_count, 0..1);
+        }
     }
 
     {
