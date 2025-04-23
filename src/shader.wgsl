@@ -17,12 +17,19 @@ struct Uniform {
     translation: vec2<f32>,
 }
 
+const SAMPLE_COUNT: f32 = 2.0;
 
-fn get_pos(i: u32) -> vec2<f32> {
-    return curve_data[i];
-}
-fn transform_pos(xy: vec2<f32>) -> vec4<f32> {
+
+
+fn get_and_transform_pos(i: u32) -> vec4<f32> {
+    let xy: vec2<f32> = curve_data[i];
     return vec4((xy + uniform_params.translation) * uniform_params.scale, 0.0, 1.0);
+}
+
+fn additive_sample_output_color(front_facing: bool) -> vec4<f32> {
+    // If back-facing, +1. If front-facing, +16.
+    let out = select(1.0/255.0, 16.0/255.0, front_facing);
+    return vec4(vec3(out), 0.0);
 }
 
 
@@ -30,7 +37,7 @@ fn transform_pos(xy: vec2<f32>) -> vec4<f32> {
 @vertex
 fn triangle_vertex(@builtin(vertex_index) index: u32) -> TriangleVertexOutput {
     var out: TriangleVertexOutput;
-    out.clip_position = transform_pos(get_pos(index + index / 3));
+    out.clip_position = get_and_transform_pos(index + index / 3);
     return out;
 }
 
@@ -39,8 +46,8 @@ struct TriangleVertexOutput {
 };
 
 @fragment
-fn triangle_fragment(in: TriangleVertexOutput) -> @location(0) vec4<f32> {
-    return vec4(1.0/255.0, 0.0, 0.0, 0.1);
+fn triangle_fragment(in: TriangleVertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    return additive_sample_output_color(front_facing);
 }
 
 
@@ -48,26 +55,33 @@ fn triangle_fragment(in: TriangleVertexOutput) -> @location(0) vec4<f32> {
 @vertex
 fn bezier_vertex(@builtin(vertex_index) index: u32) -> BezierVertexOutput {
     var out: BezierVertexOutput;
-    out.clip_position = transform_pos(get_pos(index + index / 3 + 1));
+
+    // +1 gives the Bezier curve data instead of the triangle data.
+    out.clip_position = get_and_transform_pos(index + index / 3 + 1);
+
     let vertex_index = index % 3;
-    out.barycentric_coordinates = vec2<f32>(vec2(vertex_index) == vec2<u32>(0, 2));
+    out.uv = vec2<f32>(
+        (vec3<f32>(1.0, 0.0, 0.5))[vertex_index],
+        f32(vertex_index == 0),
+    );
+
     return out;
 }
 
 struct BezierVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) barycentric_coordinates: vec2<f32>,
+    @location(0) uv: vec2<f32>,
 }
 
 @fragment
-fn bezier_fragment(in: BezierVertexOutput) -> @location(0) vec4<f32> {
-    let t = in.barycentric_coordinates[0];
-    let s = in.barycentric_coordinates[1];
-    let tmp = s/2 + t;
-    if tmp * tmp > t {
+fn bezier_fragment(in: BezierVertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    // Discard fragment if outside the bezier curve.
+    if in.uv.x * in.uv.x >= in.uv.y {
         discard;
     }
-    return vec4(1.0/255.0, 0.0, 0.0, 0.1);
+
+    return additive_sample_output_color(front_facing);
+    // return vec4(in.uv, 0.5, select(1.0, 0.2, in.uv.x * in.uv.x < in.uv.y));
 }
 
 
@@ -86,12 +100,21 @@ struct PostprocessVertexOutput {
 
 @fragment
 fn postprocess_fragment(in: PostprocessVertexOutput) -> @location(0) vec4<f32> {
-    // let size = ;
-    // let uv = in.clip_position.xy / vec2<f32>(textureDimensions(sample_texture))
     let coords = vec2<u32>(in.clip_position.xy);
-    let data = unpack4xU8(pack4x8unorm(textureLoad(sample_texture, coords, 0)));
-    // if data == 0 {
-    //     discard;
-    // }
-    return vec4(1.0, 1.0, 1.0, f32(data.r % 2));
+    let texture_value = textureLoad(sample_texture, coords, 0);
+
+    let data: u32 = pack4x8unorm(texture_value);
+    // For each component, compute front-facing count minus back-facing count.
+    let packed_totals: u32 = ((data >> 4) & 0x0F0F0F0F) - (data & 0x0F0F0F0F);
+
+    // Display bright red to indicate underflow.
+    // If the curve data is good, then this should be impossible.
+    if (packed_totals & 0xF0F0F0F0) != 0 {
+        return vec4(1.0, 0.0, 0.0, 1.0);
+    }
+
+    // Get total for each component separately, then convert to float.
+    let totals = vec4<f32>(unpack4xU8(packed_totals));
+
+    return vec4(totals.rgb / SAMPLE_COUNT, 1.0);
 }

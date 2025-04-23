@@ -15,7 +15,7 @@ use crate::gfx::{DrawParams, Gfx, Glyph};
 
 /// "Hello" written using several different scripts
 const GREETINGS: &[&str] = &[
-    "Hello! fligatures",        // Latin (English)
+    "Hello!",                   // Latin (English)
     "السلام عليكم",              // Arabic
     "سَلام",                      // Persian (Farsi)
     "नमस्ते",                     // Devanagari (Hindi)
@@ -48,6 +48,8 @@ pub struct App {
 
     /// Points, stored in em coordinates.
     points: Vec<egui::Pos2>,
+
+    initial: bool,
 }
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -105,6 +107,8 @@ impl App {
                 egui::pos2(1.0, 6.0),
                 egui::pos2(4.0, 3.0),
             ],
+
+            initial: true,
         }
     }
 }
@@ -115,7 +119,7 @@ impl eframe::App for App {
             ui.scope(|ui| {
                 ui.label("Font size");
                 let r =
-                    ui.add(egui::Slider::new(&mut self.px_per_em, 1.0..=720.0).logarithmic(true));
+                    ui.add(egui::Slider::new(&mut self.px_per_em, 1.0..=7200.0).logarithmic(true));
                 font_size_changed |= r.changed();
             })
             .response
@@ -141,7 +145,8 @@ impl eframe::App for App {
             // let context = swash::scale::ScaleContext::new();
             // context.builder(self.font);
 
-            if ui.text_edit_multiline(&mut self.text).changed() {
+            if ui.text_edit_multiline(&mut self.text).changed() || std::mem::take(&mut self.initial)
+            {
                 let mut layout_ctx = LayoutContext::new();
 
                 let mut builder = layout_ctx.ranged_builder(&mut self.font_ctx, &self.text, 1.0);
