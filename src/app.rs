@@ -10,7 +10,7 @@ use parley::{
 use swash::FontRef;
 use swash::zeno::{PathData, Vector};
 
-use crate::gfx::{DrawParams, Gfx, Glyph};
+use crate::gfx::{DrawParams, Gfx, Glyph, Renderer};
 
 /// "Hello" written using several different scripts
 const GREETINGS: &[&str] = &[
@@ -25,8 +25,9 @@ const GREETINGS: &[&str] = &[
 ];
 
 pub struct App {
-    gfx: Arc<Gfx>,
-    renderer: Arc<RwLock<egui_wgpu::Renderer>>,
+    gfx: Gfx,
+    egui_renderer: Arc<RwLock<egui_wgpu::Renderer>>,
+    text_renderer: Renderer,
     texture_id: TextureId,
 
     font_ref: FontRef<'static>,
@@ -38,12 +39,17 @@ pub struct App {
     ///
     /// This emulates a display with lower pixel density.
     pixel_scale: u32,
-    /// Translation of the viewport.
+    /// Translation of the viewport, in ems.
     translation: egui::Vec2,
 
     /// Text to render.
     text: String,
     glyphs: Vec<Glyph>,
+
+    gamma: f32,
+    prescale: bool,
+    hint: bool,
+    subpixel_aa: bool,
 
     initial: bool,
 }
@@ -58,17 +64,17 @@ impl App {
             device,
             queue,
             target_format,
-            renderer,
+            renderer: egui_renderer,
             ..
         } = wgpu_render_state;
 
-        let gfx = Arc::new(Gfx::new(adapter, device, queue, target_format));
+        let gfx = Gfx::new(adapter, device, queue, target_format);
 
-        let texture_id = renderer.write().register_native_texture(
+        let text_renderer = Renderer::new(&gfx);
+
+        let texture_id = egui_renderer.write().register_native_texture(
             &gfx.device,
-            &gfx.output_texture
-                .lock()
-                .create_view(&wgpu::TextureViewDescriptor::default()),
+            &gfx.create_dummy_texture_view(),
             wgpu::FilterMode::Nearest,
         );
 
@@ -85,18 +91,25 @@ impl App {
 
         Self {
             gfx,
-            renderer,
+            egui_renderer,
+            text_renderer,
             texture_id,
 
             font_ref,
             font_ctx,
 
-            px_per_em: 72.0,
+            px_per_em: 14.0,
             pixel_scale: 1,
             translation: egui::Vec2::ZERO,
 
             text: GREETINGS.iter().join("\n"),
+            // text: "4:30 AM\n\n\n\nhello\n\n\n\nmeow".to_owned(),
             glyphs: vec![],
+
+            gamma: 2.2,
+            prescale: false,
+            hint: false,
+            subpixel_aa: false,
 
             initial: true,
         }
@@ -106,6 +119,15 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::new(egui::panel::Side::Left, "left_panel").show(ctx, |ui| {
             let mut font_size_changed = false;
+            ui.checkbox(&mut self.prescale, "Pre-scale");
+            if !self.prescale {
+                self.hint = false;
+            }
+            ui.add_enabled_ui(self.prescale, |ui| {
+                ui.checkbox(&mut self.hint, "Hint");
+            });
+            ui.checkbox(&mut self.subpixel_aa, "Subpixel AA");
+            ui.add(egui::Slider::new(&mut self.gamma, 0.0..=3.0));
             ui.scope(|ui| {
                 ui.label("Font size");
                 let r =
@@ -135,30 +157,47 @@ impl eframe::App for App {
             // let context = swash::scale::ScaleContext::new();
             // context.builder(self.font);
 
-            if ui.text_edit_multiline(&mut self.text).changed() || std::mem::take(&mut self.initial)
+            if ui.text_edit_multiline(&mut self.text).changed()
+                || std::mem::take(&mut self.initial)
+                || true
             {
                 let mut layout_ctx = LayoutContext::new();
 
+                let font_size = if self.prescale { self.px_per_em } else { 1.0 };
+                let post_scale = 1.0 / font_size;
+
                 let mut builder = layout_ctx.ranged_builder(&mut self.font_ctx, &self.text, 1.0);
-                builder.push_default(StyleProperty::FontStack(parley::FontStack::Single(
-                    parley::FontFamily::Named("Arial Unicode MS".into()),
+                builder.push_default(StyleProperty::FontStack(parley::FontStack::List(
+                    vec![
+                        parley::FontFamily::Named("Open Sans".into()),
+                        parley::FontFamily::Named("Arial Unicode MS".into()),
+                    ]
+                    .into(),
                 )));
                 builder.push_default(StyleProperty::LineHeight(1.3));
-                builder.push_default(StyleProperty::FontSize(1.0));
+                builder.push_default(StyleProperty::FontSize(font_size));
                 builder.push(StyleProperty::FontWeight(FontWeight::new(600.0)), ..);
                 let mut layout: Layout<()> = builder.build(&self.text);
                 layout.break_all_lines(None);
                 layout.align(None, Alignment::Start, AlignmentOptions::default());
 
                 let mut scale_ctx = swash::scale::ScaleContext::new();
-                let mut scaler = scale_ctx.builder(self.font_ref).size(1.0).build();
+                let mut scaler = scale_ctx
+                    .builder(self.font_ref)
+                    .size(font_size)
+                    .hint(self.hint)
+                    .size(1.0)
+                    .build();
 
                 let mut output = vec![];
+
+                let mut init_baseline = None;
 
                 for line in layout.lines() {
                     for item in line.items() {
                         match item {
                             parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
+                                let baseline = *init_baseline.get_or_insert(glyph_run.baseline());
                                 for glyph in glyph_run.positioned_glyphs() {
                                     if let Some(outline) = scaler.scale_outline(glyph.id) {
                                         let mut curves = vec![];
@@ -195,12 +234,13 @@ impl eframe::App for App {
                                             }
                                         }
                                         output.push(Glyph {
-                                            offset: [glyph.x, -glyph.y],
+                                            offset: [
+                                                glyph.x * post_scale,
+                                                (baseline - glyph.y) * post_scale,
+                                            ],
                                             curves: curves
                                                 .into_iter()
-                                                .map(|curve| {
-                                                    curve.map(|v| [v.x + glyph.x, v.y - glyph.y])
-                                                })
+                                                .map(|curve| curve.map(|v| v).map(|v| [v.x, v.y]))
                                                 .collect(),
                                         });
                                     }
@@ -227,32 +267,24 @@ impl eframe::App for App {
             let em_rect = egui::Rect::from_center_size(egui::Pos2::ZERO, em_rect_size);
             let egui_to_em = emath::RectTransform::from_to(egui_rect, em_rect);
 
-            // Update output size
-            self.gfx
-                .set_output_size(px_rect_size.x as u32, px_rect_size.y as u32);
-
-            // NDC = normalized device coordinates (-1 to +1 for the whole texture)
-            let em_per_ndc = px_rect_size / 2.0 / self.px_per_em;
-            crate::gfx::draw(
-                &self.gfx,
-                DrawParams {
-                    scale: [1.0 / em_per_ndc.x, 1.0 / em_per_ndc.y],
-                    translation: self.translation.into(),
-                    glyphs: self.glyphs.clone(),
-                },
-            );
+            let output_texture_view = self.text_renderer.draw(DrawParams {
+                output_size: [px_rect_size.x as u32, px_rect_size.y as u32],
+                px_per_em: self.px_per_em,
+                translation: self.translation.into(),
+                glyphs: self.glyphs.clone(),
+                gamma: self.gamma,
+                subpixel_aa: self.subpixel_aa,
+            });
 
             // Update egui texture
-            self.renderer.write().update_egui_texture_from_wgpu_texture(
-                &self.gfx.device,
-                &self
-                    .gfx
-                    .output_texture
-                    .lock()
-                    .create_view(&wgpu::TextureViewDescriptor::default()),
-                wgpu::FilterMode::Nearest,
-                self.texture_id,
-            );
+            self.egui_renderer
+                .write()
+                .update_egui_texture_from_wgpu_texture(
+                    &self.gfx.device,
+                    &output_texture_view,
+                    wgpu::FilterMode::Nearest,
+                    self.texture_id,
+                );
 
             let r = egui::Frame::canvas(ui.style()).show(ui, |ui| {
                 // Draw egui texture
@@ -272,6 +304,20 @@ impl eframe::App for App {
             let egui_delta = r.drag_delta();
             let em_delta = egui_delta * egui_to_em.scale() * egui::vec2(1.0, -1.0);
             self.translation += em_delta;
+
+            // Handle canvas scale interaction
+            if let Some(pos) = r.hover_pos() {
+                let get_em_vec_from_center_of_canvas = |p: egui::Pos2, px_per_em: f32| {
+                    let egui_vec_from_center_of_canvas = p - egui_rect.center();
+                    let pixel_vec_from_center_of_canvas =
+                        egui_vec_from_center_of_canvas * ui.pixels_per_point();
+                    let em_vec_from_center_of_canvas = pixel_vec_from_center_of_canvas / px_per_em;
+                    em_vec_from_center_of_canvas * egui::vec2(1.0, -1.0)
+                };
+                self.translation -= get_em_vec_from_center_of_canvas(pos, self.px_per_em);
+                self.px_per_em *= ui.input(|input| input.zoom_delta());
+                self.translation += get_em_vec_from_center_of_canvas(pos, self.px_per_em);
+            }
         });
     }
 }
