@@ -1,10 +1,12 @@
 mod bindings;
 mod cached;
+mod glyph_cache;
 mod pipelines;
 mod renderer;
 mod structs;
 
-pub use renderer::{DrawParams, Glyph, Renderer};
+pub use glyph_cache::{cubic_to_quadratics, GlyphCache, GlyphCacheKey};
+pub use renderer::{DrawParams, Glyph, Renderer, RenderStats};
 
 const SAMPLE_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
